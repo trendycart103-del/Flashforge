@@ -1,9 +1,14 @@
 
-name: Extract ZIP and Build APK
+name: FlashForge ZIP Extract and Build
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+
+  pull_request:
+
   workflow_dispatch:
 
 permissions:
@@ -11,103 +16,134 @@ permissions:
 
 jobs:
   build:
+    name: Extract ZIP and Compile Android App
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      # 1. Checkout GitHub Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
-        id: locate
+      # 2. Verify uploaded ZIP
+      - name: Verify FlashForge ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t ZIP_FILES < <(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' ! -path '*/unpacked/*' | sort)
-
-          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo "No project ZIP found!"
+          if [ ! -f "FlashForge.zip" ]; then
+            echo "::error::FlashForge.zip was not found in repository root."
             exit 1
           fi
 
-          if [ "${#ZIP_FILES[@]}" -gt 1 ]; then
-            echo "More than one ZIP found. Keep only one project ZIP."
+          echo "Checking ZIP integrity..."
+          unzip -t FlashForge.zip
+
+      # 3. Extract complete ZIP
+      - name: Extract FlashForge Project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p extracted
+
+          unzip -q FlashForge.zip -d extracted
+
+          if [ -f "extracted/project/settings.gradle.kts" ]; then
+            PROJECT_DIR="extracted/project"
+          elif [ -f "extracted/settings.gradle.kts" ]; then
+            PROJECT_DIR="extracted"
+          else
+            echo "::error::Gradle project was not found after extraction."
+            find extracted -maxdepth 3 -type f | head -100
             exit 1
           fi
 
-          ZIP_FILE="${ZIP_FILES[0]}"
-          EXTRACT_DIR="$GITHUB_WORKSPACE/unpacked"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          mkdir -p "$EXTRACT_DIR"
-          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+          echo "Project extracted successfully."
+          echo "Project directory: $PROJECT_DIR"
 
-          SETTINGS_FILE="$(find "$EXTRACT_DIR" -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print -quit)"
-
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "Gradle project not found inside ZIP!"
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo "Android app module not found!"
-            exit 1
-          fi
-
-          PROJECT_REL="$(realpath --relative-to="$GITHUB_WORKSPACE" "$PROJECT_DIR")"
-
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "project_rel=$PROJECT_REL" >> "$GITHUB_OUTPUT"
-
+      # 4. Set up Java 17
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
+      # 5. Install Gradle 8.7
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      # 6. Install Android SDK
       - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 7. Install required SDK packages
+      - name: Install Android SDK Packages
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          yes | sdkmanager --licenses || true
 
-          if [ -z "$SDK_ROOT" ]; then
-            echo "Android SDK path not found!"
-            exit 1
-          fi
-
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found!"
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
-
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
+          sdkmanager \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-      - name: Build APK
+      # 8. Verify Gradle project configuration
+      - name: Verify Gradle Project
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          gradle -p "${{ steps.locate.outputs.project_dir }}" clean testDebugUnitTest lintDebug assembleDebug --no-build-cache --stacktrace
+          gradle projects --stacktrace
 
-      - name: Upload APK
+      # 9. Run Unit Tests
+      - name: Run Unit Tests
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          gradle testDebugUnitTest --stacktrace
+
+      # 10. Run Android Lint
+      - name: Run Android Lint
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          gradle lintDebug --stacktrace
+
+      # 11. Build Debug APK
+      - name: Build FlashForge Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          gradle clean assembleDebug --stacktrace
+
+      # 12. Verify APK output
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK file was not generated."
+            exit 1
+          fi
+
+          echo "APK successfully generated."
+          ls -lh "$APK"
+
+      # 13. Upload APK and reports
+      - name: Upload FlashForge Build Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FlashForge-APK
+          name: FlashForge-v1.48-Android-Build
           path: |
-            ${{ steps.locate.outputs.project_rel }}/app/build/outputs/apk/debug/*.apk
-            ${{ steps.locate.outputs.project_rel }}/app/build/reports/tests/testDebugUnitTest/**
-            ${{ steps.locate.outputs.project_rel }}/app/build/reports/lint-results-debug.html
+            extracted/**/app/build/outputs/apk/debug/*.apk
+            extracted/**/app/build/reports/tests/testDebugUnitTest/**
+            extracted/**/app/build/reports/lint-results-debug.html
           if-no-files-found: warn
+          retention-days: 14
