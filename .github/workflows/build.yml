@@ -63,22 +63,25 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # 6. Setup Android SDK
+      # 6. Setup Android SDK - Fixed
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
       # 7. Install Required Android SDK Packages
       - name: Install Android SDK Packages
         run: |
-          echo "Accepting Android SDK licenses..."
-          yes | sdkmanager --licenses >/dev/null || true
-
-          echo "Installing required Android SDK packages..."
+          echo "Installing Android SDK packages..."
 
           sdkmanager --install \
-            "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
+
+          echo "Checking installed SDK packages..."
+          sdkmanager --list_installed
 
           echo "Android SDK installation completed."
 
