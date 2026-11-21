@@ -21,7 +21,6 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Find ZIP File
-        id: zip
         shell: bash
         run: |
           set -euo pipefail
@@ -34,7 +33,7 @@ jobs:
           )
 
           if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: No ZIP file found in repository root."
+            echo "ERROR: No ZIP file found."
             exit 1
           fi
 
@@ -44,12 +43,10 @@ jobs:
             exit 1
           fi
 
-          ZIP_FILE="${ZIP_FILES[0]}"
+          echo "ZIP_FILE=${ZIP_FILES[0]}" >> "$GITHUB_ENV"
 
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
-
-          echo "Selected ZIP:"
-          echo "$ZIP_FILE"
+          echo "ZIP selected:"
+          echo "${ZIP_FILES[0]}"
 
       - name: Extract ZIP
         shell: bash
@@ -62,12 +59,6 @@ jobs:
             -d "$GITHUB_WORKSPACE/extracted"
 
           echo "ZIP extraction successful."
-
-          echo "Extracted files:"
-          find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 3 \
-            -type f \
-            | head -100
 
       - name: Locate Android Project
         shell: bash
@@ -97,58 +88,100 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project detected:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
-
-          echo "Project files:"
-          ls -la "$PROJECT_DIR"
 
       - name: Set Up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
       - name: Set Up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
-      - name: Set Up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "ERROR: Android SDK directory not found:"
+            echo "$SDK_ROOT"
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          SDKMANAGER=$(find \
+            "$SDK_ROOT/cmdline-tools" \
+            -type f \
+            -name sdkmanager \
+            -path "*/bin/sdkmanager" \
+            | sort -V \
+            | tail -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+
+          echo "SDK Manager:"
+          echo "$SDKMANAGER"
+
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" \
+            >> "$GITHUB_ENV"
+
+          echo "$SDK_ROOT/platform-tools" \
+            >> "$GITHUB_PATH"
+
+          echo "$(dirname "$SDKMANAGER")" \
+            >> "$GITHUB_PATH"
+
+          echo "SDKMANAGER=$SDKMANAGER" \
+            >> "$GITHUB_ENV"
+
+      - name: Accept Android SDK Licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          yes | "$SDKMANAGER" --licenses \
+            || true
 
       - name: Install Android SDK Components
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager --licenses \
-            >/dev/null 2>&1 || true
-
-          sdkmanager \
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-          echo "Android SDK installation completed."
+          echo "Android SDK components installed."
 
       - name: Verify Build Environment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java version:"
+          echo "Java:"
           java -version
 
-          echo "Gradle version:"
+          echo "Gradle:"
           gradle --version
 
           echo "Android SDK:"
           echo "$ANDROID_HOME"
 
-          echo "Installed SDK packages:"
-          sdkmanager --list_installed
+          echo "SDK Packages:"
+          "$SDKMANAGER" --list_installed
 
       - name: Gradle Clean
         working-directory: ${{ env.PROJECT_DIR }}
@@ -169,8 +202,7 @@ jobs:
           gradle \
             --no-daemon \
             assembleDebug \
-            --stacktrace \
-            --info
+            --stacktrace
 
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -188,8 +220,6 @@ jobs:
           echo "APK BUILD SUCCESSFUL"
 
           ls -lh "$APK"
-
-          file "$APK"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
